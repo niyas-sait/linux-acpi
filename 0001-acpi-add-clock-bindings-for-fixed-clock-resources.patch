@@ -1,0 +1,142 @@
+From a08c15e9395dfc42a9a316e8d0df70bc99e9c2d2 Mon Sep 17 00:00:00 2001
+From: Niyas Sait <niyassait@gmail.com>
+Date: Mon, 7 Aug 2023 08:28:09 +0100
+Subject: [PATCH 1/1] [acpi] add clock bindings for fixed clock resources
+
+---
+ drivers/acpi/Makefile   |  1 +
+ drivers/acpi/acpi_clk.c | 83 +++++++++++++++++++++++++++++++++++++++++
+ drivers/acpi/scan.c     |  2 +
+ include/linux/acpi.h    |  2 +
+ 4 files changed, 88 insertions(+)
+ create mode 100644 drivers/acpi/acpi_clk.c
+
+diff --git a/drivers/acpi/Makefile b/drivers/acpi/Makefile
+index 3fc5a0d54f6e..08201c9b39d0 100644
+--- a/drivers/acpi/Makefile
++++ b/drivers/acpi/Makefile
+@@ -108,6 +108,7 @@ obj-$(CONFIG_ACPI_SPCR_TABLE)	+= spcr.o
+ obj-$(CONFIG_ACPI_DEBUGGER_USER) += acpi_dbg.o
+ obj-$(CONFIG_ACPI_PPTT) 	+= pptt.o
+ obj-$(CONFIG_ACPI_PFRUT)	+= pfr_update.o pfr_telemetry.o
++acpi-y	+= acpi_clk.o
+ 
+ # processor has its own "processor." module_param namespace
+ processor-y			:= processor_driver.o processor_thermal.o
+diff --git a/drivers/acpi/acpi_clk.c b/drivers/acpi/acpi_clk.c
+new file mode 100644
+index 000000000000..25fd2d9941db
+--- /dev/null
++++ b/drivers/acpi/acpi_clk.c
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * drivers/acpi/acpi_clk.c - ACPI device clock resources support.
++ *
++ */
++
++#include <linux/acpi.h>
++#include <linux/clk-provider.h>
++#include <linux/clkdev.h>
++
++struct acpi_clk_lookup {
++	u16 freq_div;
++	u32 freq_num;
++	u8 scale;
++	u8 mode;
++	int index;
++	bool found;
++	int n;
++};
++
++static uint64_t calc_clock_rate(u32 freq_num, u16 freq_denom, u8 scale)
++{
++	uint32_t scale_factor[3] = { 1, 1000, 1000000 };
++	uint64_t rate = 0;
++
++	if (scale < ARRAY_SIZE(scale_factor))
++		rate = DIV_ROUND_UP(freq_num * scale_factor[scale], freq_denom);
++
++	return rate;
++}
++
++static int acpi_populate_clk_lookup(struct acpi_resource *ares, void *data)
++{
++	struct acpi_clk_lookup *lookup = data;
++	struct acpi_resource_clock_input *resource = &ares->data.clock_input;
++
++	if (ares->type != ACPI_RESOURCE_TYPE_CLOCK_INPUT)
++		return 1;
++
++	if (lookup->n++ != lookup->index)
++		return 1;
++
++	lookup->mode = resource->mode;
++	lookup->freq_div = resource->frequency_divisor;
++	lookup->freq_num = resource->frequency_numerator;
++	lookup->scale = resource->scale;
++	lookup->found = true;
++
++	return 1;
++}
++
++void acpi_clk_register(struct acpi_device *adev, int index)
++{
++	struct acpi_clk_lookup lookup;
++	struct list_head list;
++	struct clk *clk;
++	uint64_t rate;
++	int ret;
++
++	INIT_LIST_HEAD(&list);
++
++	memset(&lookup, 0, sizeof(lookup));
++	lookup.index = index;
++
++	ret = acpi_dev_get_resources(adev, &list, acpi_populate_clk_lookup,
++				     &lookup);
++	if (ret < 0)
++		return;
++
++	acpi_dev_free_resource_list(&list);
++
++	/* register fixed clocks only */
++	if (!lookup.found || lookup.mode != 0)
++		return;
++
++	rate = calc_clock_rate(lookup.freq_num, lookup.freq_div, lookup.scale);
++
++	clk = clk_register_fixed_rate(&adev->dev, dev_name(&adev->dev), NULL, 0,
++				      rate);
++	clk_register_clkdev(clk, dev_name(&adev->dev), NULL);
++
++	return;
++}
+\ No newline at end of file
+diff --git a/drivers/acpi/scan.c b/drivers/acpi/scan.c
+index 5b145f1aaa1b..17e339ee45b9 100644
+--- a/drivers/acpi/scan.c
++++ b/drivers/acpi/scan.c
+@@ -1782,6 +1782,8 @@ void acpi_init_device_object(struct acpi_device *device, acpi_handle handle,
+ 	device_initialize(&device->dev);
+ 	dev_set_uevent_suppress(&device->dev, true);
+ 	acpi_init_coherency(device);
++	/* register clock resource at index 0 (fixed clock) */
++	acpi_clk_register(device, 0);
+ }
+ 
+ static void acpi_scan_dep_init(struct acpi_device *adev)
+diff --git a/include/linux/acpi.h b/include/linux/acpi.h
+index 641dc4843987..7f31481deb3e 100644
+--- a/include/linux/acpi.h
++++ b/include/linux/acpi.h
+@@ -1535,4 +1535,6 @@ static inline void acpi_device_notify(struct device *dev) { }
+ static inline void acpi_device_notify_remove(struct device *dev) { }
+ #endif
+ 
++void acpi_clk_register(struct acpi_device *adev, int index);
++
+ #endif	/*_LINUX_ACPI_H*/
+-- 
+2.34.1
+
