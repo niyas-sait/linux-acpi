@@ -1,0 +1,204 @@
+From 36cee58072961adf94c0ae9becc8c0bce1b26071 Mon Sep 17 00:00:00 2001
+From: Niyas Sait <niyassait@gmail.com>
+Date: Sat, 5 Aug 2023 11:39:44 +0100
+Subject: [PATCH 2/5] wip: clock drive binding
+
+---
+ drivers/acpi/clock.c           | 86 ++++++++++++++++++++++++++++++++++
+ drivers/acpi/scan.c            |  8 +++-
+ drivers/clk/clk-conf.c         |  2 +-
+ drivers/clk/clkdev.c           |  3 ++
+ drivers/devfreq/imx8m-ddrc.c   |  3 ++
+ drivers/pnp/pnpacpi/rsparser.c |  1 +
+ 6 files changed, 101 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/acpi/clock.c
+
+diff --git a/drivers/acpi/clock.c b/drivers/acpi/clock.c
+new file mode 100644
+index 000000000000..850e0fd9359d
+--- /dev/null
++++ b/drivers/acpi/clock.c
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * drivers/acpi/clock.c - ACPI device clock resources support.
++ *
++ */
++
++#include <linux/acpi.h>
++
++
++struct clock_resource_crs_walk_ctxt {
++	int current_index;
++	struct acpi_device *adev;
++	uint64_t rate;
++	bool found;
++};
++
++
++static uint64_t calc_clock_rate(struct acpi_resource_clock_input *res)
++{
++	uint32_t scale[3] = {1, 1000, 1000000};
++
++	// TODO: add error check
++	return DIV_ROUND_UP(res->frequency_numerator * scale[res->scale],
++			    res->frequency_divisor);
++}
++
++void acpi_dev_register_fixed_rate_clock(struct acpi_device *adev, int index, struct acpi_resource_clock_input *res){
++		struct clk *clk;
++		uint64_t rate;
++		
++		rate = calc_clock_rate(res);
++		clk_register_fixed_rate(&adev->dev, dev_name(&adev->dev), NULL, 0, rate);
++		clk_register_clkdev(clk, NULL, dev_name(&adev->dev));
++}
++
++static int walk_clock_input_resource(struct acpi_resource *ares, void *data)
++{
++	struct clock_resource_crs_walk_ctxt *ctxt = data;
++	struct acpi_resource_clock_input *resource = &ares->data.clock_input;
++
++	if (ares->type == ACPI_RESOURCE_TYPE_CLOCK_INPUT) {
++			resource = &ares->data.clock_input;
++			switch(resource->mode){
++				case 0: // FIXED
++					ctxt->rate = calc_clock_rate(resource);
++					// acpi_dev_register_fixed_rate_clock(ctxt->adev, ctxt->current_index, resource);
++				default:
++					break;
++			}
++	}
++
++	return 1;
++}
++
++struct clk_hw *acpi_clk_get_hw(struct acpi_device *adev, int index, const char *con_id)
++{
++	struct clock_resource_crs_walk_ctxt ctxt;
++	struct list_head list;
++
++	INIT_LIST_HEAD(&list);
++	ctxt.current_index = 0;
++	ctxt.adev = adev;
++
++	acpi_dev_get_resources(adev, &list, walk_clock_input_resource, &ctxt);
++
++	acpi_dev_free_resource_list(&list);
++
++	return;
++
++}
++
++void acpi_dev_register_clock_resources(struct acpi_device *adev)
++{
++	struct clock_resource_crs_walk_ctxt ctxt;
++	struct list_head list;
++
++	INIT_LIST_HEAD(&list);
++	ctxt.current_index = 0;
++	ctxt.adev = adev;
++
++	acpi_dev_get_resources(adev, &list, walk_clock_input_resource, &ctxt);
++
++	acpi_dev_free_resource_list(&list);
++
++	return;
++}
+\ No newline at end of file
+diff --git a/drivers/acpi/scan.c b/drivers/acpi/scan.c
+index b86d51ec2d01..333d2909107b 100644
+--- a/drivers/acpi/scan.c
++++ b/drivers/acpi/scan.c
+@@ -1780,6 +1780,10 @@ static bool acpi_device_enumeration_by_parent(struct acpi_device *device)
+ 	return is_serial_bus_slave;
+ }
+ 
++#include <linux/clkdev.h>
++#include <linux/clk-provider.h>
++
++
+ void acpi_init_device_object(struct acpi_device *device, acpi_handle handle,
+ 			     int type)
+ {
+@@ -1801,6 +1805,7 @@ void acpi_init_device_object(struct acpi_device *device, acpi_handle handle,
+ 	device_initialize(&device->dev);
+ 	dev_set_uevent_suppress(&device->dev, true);
+ 	acpi_init_coherency(device);
++	acpi_dev_register_clock_resources(device);
+ }
+ 
+ static void acpi_scan_dep_init(struct acpi_device *adev)
+@@ -1849,7 +1854,7 @@ static int acpi_add_single_object(struct acpi_device **child,
+ 	if (type == ACPI_BUS_TYPE_DEVICE || type == ACPI_BUS_TYPE_PROCESSOR) {
+ 		if (dep_init) {
+ 			mutex_lock(&acpi_dep_list_lock);
+-			/*
++		/*
+ 			 * Hold the lock until the acpi_tie_acpi_dev() call
+ 			 * below to prevent concurrent acpi_scan_clear_dep()
+ 			 * from deleting a dependency list entry without
+@@ -1877,6 +1882,7 @@ static int acpi_add_single_object(struct acpi_device **child,
+ 		return result;
+ 	}
+ 
++
+ 	acpi_power_add_remove_device(device, true);
+ 	acpi_device_add_finalize(device);
+ 
+diff --git a/drivers/clk/clk-conf.c b/drivers/clk/clk-conf.c
+index 2ef819606c41..40813b700c68 100644
+--- a/drivers/clk/clk-conf.c
++++ b/drivers/clk/clk-conf.c
+@@ -129,7 +129,7 @@ static int __set_clk_rates(struct device_node *node, bool clk_supplier)
+  * determines the @node is also a supplier of any of the clocks.
+  */
+ int of_clk_set_defaults(struct device_node *node, bool clk_supplier)
+-{
++{	
+ 	int rc;
+ 
+ 	if (!node)
+diff --git a/drivers/clk/clkdev.c b/drivers/clk/clkdev.c
+index 67f601a41023..4df47bfdd38a 100644
+--- a/drivers/clk/clkdev.c
++++ b/drivers/clk/clkdev.c
+@@ -106,6 +106,9 @@ struct clk *clk_get(struct device *dev, const char *con_id)
+ 		hw = of_clk_get_hw(dev->of_node, 0, con_id);
+ 		if (!IS_ERR(hw) || PTR_ERR(hw) == -EPROBE_DEFER)
+ 			return clk_hw_create_clk(dev, hw, dev_id, con_id);
++	} else if(dev && has_acpi_companion(dev)){
++		hw = acpi_clk_get_hw(dev->of_node, 0, con_id);
++
+ 	}
+ 
+ 	return __clk_get_sys(dev, dev_id, con_id);
+diff --git a/drivers/devfreq/imx8m-ddrc.c b/drivers/devfreq/imx8m-ddrc.c
+index 30543391c03e..0fc22552f4cc 100644
+--- a/drivers/devfreq/imx8m-ddrc.c
++++ b/drivers/devfreq/imx8m-ddrc.c
+@@ -383,6 +383,9 @@ static int imx8m_ddrc_probe(struct platform_device *pdev)
+ 	const char *gov = DEVFREQ_GOV_USERSPACE;
+ 	int ret;
+ 
++	struct clk *clk = devm_clk_get(&pdev->dev, NULL);
++	printk("clk->getrate %d \n", clk_get_rate(clk));
++
+ 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+ 	if (!priv)
+ 		return -ENOMEM;
+diff --git a/drivers/pnp/pnpacpi/rsparser.c b/drivers/pnp/pnpacpi/rsparser.c
+index da78dc77aed3..bfa10289b0cd 100644
+--- a/drivers/pnp/pnpacpi/rsparser.c
++++ b/drivers/pnp/pnpacpi/rsparser.c
+@@ -210,6 +210,7 @@ static acpi_status pnpacpi_allocated_resource(struct acpi_resource *res,
+ 		} else {
+ 			flags = IORESOURCE_DISABLED;
+ 		}
++		printk("pnp_add gpio resource\n");
+ 		pnp_add_irq_resource(dev, i, flags);
+ 		return AE_OK;
+ 	} else if (r->flags & IORESOURCE_DISABLED) {
+-- 
+2.34.1
+

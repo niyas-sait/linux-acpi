@@ -1,0 +1,113 @@
+From 06489604e420354f752f81955e1703a24dfb50ee Mon Sep 17 00:00:00 2001
+From: Niyas Sait <niyassait@gmail.com>
+Date: Mon, 7 Aug 2023 08:28:09 +0100
+Subject: [PATCH 5/5] add acpi_clk.c
+
+---
+ drivers/acpi/acpi_clk.c | 93 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 93 insertions(+)
+ create mode 100644 drivers/acpi/acpi_clk.c
+
+diff --git a/drivers/acpi/acpi_clk.c b/drivers/acpi/acpi_clk.c
+new file mode 100644
+index 000000000000..23b920bc0f63
+--- /dev/null
++++ b/drivers/acpi/acpi_clk.c
+@@ -0,0 +1,93 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * drivers/acpi/acpi_clk.c - ACPI device clock resources support.
++ *
++ */
++
++#include <linux/acpi.h>
++#include <linux/clk-provider.h>
++#include <linux/clkdev.h>
++
++struct acpi_clk_lookup {
++	u16 freq_div;
++	u32 freq_num;
++	u8 scale;
++	u8 mode;
++	int index;
++	int n;
++	bool found;
++};
++
++static uint64_t calc_clock_rate(u32 freq_num, u16 freq_denom, u8 scale)
++{
++	uint32_t scale_factor[3] = { 1, 1000, 1000000 };
++	uint64_t rate;
++
++	if (scale > 3) {
++		WARN_ON(1);
++		return 0;
++	}
++
++	rate = DIV_ROUND_UP(freq_num * scale_factor[scale], freq_denom);
++
++	return rate;
++}
++
++static int acpi_populate_clk_lookup(struct acpi_resource *ares, void *data)
++{
++	struct acpi_clk_lookup *lookup = data;
++	struct acpi_resource_clock_input *resource = &ares->data.clock_input;
++
++	if (ares->type != ACPI_RESOURCE_TYPE_CLOCK_INPUT)
++		return 1;
++
++	if (lookup->n++ != lookup->index)
++		return 1;
++
++	lookup->mode = resource->mode;
++	lookup->freq_div = resource->frequency_divisor;
++	lookup->freq_num = resource->frequency_numerator;
++	lookup->scale = resource->scale;
++	lookup->found = 1;
++
++	return 1;
++}
++
++void acpi_clk_register(struct acpi_device *adev, int index)
++{
++	struct acpi_clk_lookup lookup;
++	struct list_head list;
++	struct clk *clk;
++	uint64_t rate;
++	int ret;
++
++	INIT_LIST_HEAD(&list);
++
++	memset(&lookup, 0, sizeof(lookup));
++	lookup.index = index;
++
++	ret = acpi_dev_get_resources(adev, &list, acpi_populate_clk_lookup,
++				     &lookup);
++	if (ret < 0)
++		return;
++
++	acpi_dev_free_resource_list(&list);
++
++	if (lookup.found) {
++		rate = calc_clock_rate(lookup.freq_num, lookup.freq_div,
++				       lookup.scale);
++
++		printk("adev->dev %x \n", adev->dev);
++		printk("&adev->dev %x \n", &adev->dev);
++		
++		clk = clk_register_fixed_rate(&adev->dev, dev_name(&adev->dev), NULL, 0, rate);
++		printk("clk %x \n", clk);
++		if (!IS_ERR(clk))
++			clk_register_clkdev(clk, dev_name(&adev->dev), NULL);
++
++		printk("Registered ACPI Clock device \n");
++		// return clk_hw_register_fixed_rate_with_accuracy(&adev->dev, dev_name(&adev->dev), NULL, 0, rate, 0);
++	}
++
++	return;
++}
+\ No newline at end of file
+-- 
+2.34.1
+
